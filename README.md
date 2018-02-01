@@ -21,12 +21,12 @@ The plugin will start a container when it is first called, and close the contain
 ### local play
 Run an action or activation in a local docker container. Provide input with `-p`. Return the output data and execution time. 
 ```
-local play action_name_or_activation_id [-p name value]
+[fsh] local play action_name_or_activation_id [-p name value]
 ```
 
 ### local debug (currently nodejs only)
 Run an action or activation in a local docker container, and open Chrome DevTool for live debugging. Provide input with `-p`. Return the output data. 
 ```
-local debug action_name_or_activation_id [-p name value]
+[fsh] local debug action_name_or_activation_id [-p name value]
 ```
 
