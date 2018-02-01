@@ -12,14 +12,14 @@ After installing the plugin, enter
 ```
 to see usage. 
 
-The plugin might need to download the Docker image for your action runtime the first time you use it. This takes about 20 seconds but is a one-time thing.
+The plugin might need to download the Docker image for your action runtime for the first time you use it. This takes about 20 seconds but is a one-time thing.
 
-The plugin will start a container when it is first called, and close the container when you exist Shell. 
+The plugin will start a container when it is first called, and close that container when you exist Shell. 
 
 ## Commands
 
 ### local debug (currently nodejs only)
-Run an action or activation in a local docker container, and open Chrome DevTool for live debugging. Provide input with `-p`. Return the output data. 
+Run an action or activation in a local docker container, and open Chrome DevTool in the sidecar for live debugging. Provide input with `-p`. Return the output data. 
 ```
 [fsh] local debug action_name_or_activation_id [-p name value]
 ```
