@@ -18,15 +18,19 @@ The plugin will start a container when it is first called, and close the contain
 
 ## Commands
 
+### local debug (currently nodejs only)
+Run an action or activation in a local docker container, and open Chrome DevTool for live debugging. Provide input with `-p`. Return the output data. 
+```
+[fsh] local debug action_name_or_activation_id [-p name value]
+```
+
 ### local play
 Run an action or activation in a local docker container. Provide input with `-p`. Return the output data and execution time. 
 ```
 [fsh] local play action_name_or_activation_id [-p name value]
 ```
 
-### local debug (currently nodejs only)
-Run an action or activation in a local docker container, and open Chrome DevTool for live debugging. Provide input with `-p`. Return the output data. 
-```
-[fsh] local debug action_name_or_activation_id [-p name value]
-```
+## Limitations 
+
+Currently, `debug` only works for nodejs actions. The plugin cannot debug/play a sequence; you can select child action activations and debug/play them one by one.
 
