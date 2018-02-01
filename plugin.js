@@ -85,7 +85,12 @@ module.exports = (commandTree, prequire) => {
 const local = (_a, _b, fullArgv, _1, rawCommandString, _2, argvWithoutOptions, dashOptions) => {    
 
     return new Promise((resolve, reject) => {        
-        if(argvWithoutOptions.length <= 1){
+        if(argvWithoutOptions[0] && argvWithoutOptions[0] != 'local'){
+            argvWithoutOptions.unshift('local');
+        }
+        console.log(argvWithoutOptions);
+
+        if(argvWithoutOptions.length == 1){            
             resolve(printDocs());
         }
         else if(Object.keys(docs).indexOf(argvWithoutOptions[1]) < 1){
@@ -335,7 +340,7 @@ const init = (kind, returnDiv) => {
                     return Promise.all([Promise.resolve(image)]);
                 }
                 else{
-                    appendIncreContent('Pulling the runtime docker image...', returnDiv);
+                    appendIncreContent(`Pulling ${kind} runtime docker image... This is a one-time thing.`, returnDiv);
                     return Promise.all([Promise.resolve(image), repl.qexec(`! docker pull ${image}`)]);
                 }
             }

@@ -1,6 +1,6 @@
 {
   "name": "shell-local-plugin",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "An IBM Cloud Functions Shell plugin that lets users run and debug actions locally in a docker container",
   "main": "plugin.js",
   "directories": {
