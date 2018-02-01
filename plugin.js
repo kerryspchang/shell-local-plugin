@@ -16,8 +16,8 @@
 
 const {Docker} = require('node-docker-api'),    
     docker = new Docker(),
-    rt = require('requestretry'),    
     $ = require('jquery'),
+    rt = require('requestretry'),        
     fs = require('fs-extra');
 
 const dontCreateContainer = "don't create container",
@@ -57,7 +57,13 @@ const docs = {
     kill: `<div><b>local kill container</b>: Kill and remove the Docker container this plugin uses. This command is mostly used internally by Shell. The container is removed automatically when you exit Shell.</div>`
 }
 
-
+const commandOptions = {
+    needsUI: true,
+    fullscreen: false, //width: 800, height: 600,
+    //clearREPLOnLoad: true,
+    noAuthOk: true,
+    //placeholder: 'Loading visualization ...'
+}
 
 let _container, _containerType, _containerCode, _imageDir, _image;
 
@@ -65,14 +71,13 @@ let _container, _containerType, _containerCode, _imageDir, _image;
 
 module.exports = (commandTree, prequire) => {
    
-    commandTree.listen('/local', local, {docs: docs.overall});
-    commandTree.listen('/local/play', local, {docs: docs.play});
-    commandTree.listen('/local/debug', local, {docs: docs.debug});
-    commandTree.listen('/local/init', local, {docs: docs.init});
-    commandTree.listen('/local/kill', local, {docs: docs.kill});
+    commandTree.listen('/local', local, Object.assign({docs: docs.overall}, commandOptions));
+    commandTree.listen('/local/play', local, Object.assign({docs: docs.play}, commandOptions));
+    commandTree.listen('/local/debug', local, Object.assign({docs: docs.debug}, commandOptions));
+    commandTree.listen('/local/init', local, Object.assign({docs: docs.init}, commandOptions));
+    commandTree.listen('/local/kill', local, Object.assign({docs: docs.kill}, commandOptions));
 
-    if(typeof document === 'undefined') return; 
-
+    if(typeof document === 'undefined' || typeof window === 'undefined') return; 
     
     $(window).on('beforeunload', e => {
         if(_container){
@@ -84,12 +89,12 @@ module.exports = (commandTree, prequire) => {
 
 const local = (_a, _b, fullArgv, _1, rawCommandString, _2, argvWithoutOptions, dashOptions) => {    
 
-    return new Promise((resolve, reject) => {        
+    return new Promise((resolve, reject) => {  
+        
         if(argvWithoutOptions[0] && argvWithoutOptions[0] != 'local'){
             argvWithoutOptions.unshift('local');
         }
-        console.log(argvWithoutOptions);
-
+        console.log(argvWithoutOptions);    
         if(argvWithoutOptions.length == 1){            
             resolve(printDocs());
         }
