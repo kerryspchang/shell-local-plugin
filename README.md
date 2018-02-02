@@ -1,11 +1,20 @@
 # shell-local-plugin
-An IBM Cloud Functions Shell plugin that lets users run and debug actions in a local docker container. It requires Docker to be pre-installed in your machine. 
+An IBM Cloud Functions Shell plugin that lets users run and debug actions in a local docker container. It requires Docker to be pre-installed to your machine. 
 
 ## Install
 
-First, make sure you have the latest Shell.
+First, make sure you have the latest Shell and Docker.
 ```
-npm update -g @ibm-functions/shell
+$ npm update -g @ibm-functions/shell 
+```
+
+```
+$ docker 
+
+Usage:	docker COMMAND
+
+.......
+
 ```
 
 Install the plugin using Shell's `plugin install` command (if you are in the Shell app, remove `fsh`).
@@ -22,7 +31,10 @@ to see usage.
 
 The plugin might need to download the Docker image for your action runtime for the first time you use it. This takes about 20 seconds but is a one-time thing.
 
-The plugin will start a container when it is first called, and close that container when you exist Shell. 
+The plugin will start a container when it is first called, and close that container when you close Shell. 
+
+This means that if you are using `fsh local play/debug` from the terminal (headless mode), the container will be created when the Shell app window appears and removed when the Shell app window is closed. Starting a container takes time. You can avoid this by calling `fsh local play/debug` from the terminal for the first time and keep that Shell app window opened and enter more `local` commands in there. 
+
 
 ## Commands
 
@@ -37,6 +49,7 @@ Run an action or activation in a local docker container. Provide input with `-p`
 ```
 [fsh] local play action_name_or_activation_id [-p name value]
 ```
+
 
 ## Trouble shooting 
 If you see an error like
@@ -56,6 +69,7 @@ If the error still exists, use
 lsof -i -P -n | grep LISTEN 
 ```
 to see who are using the ports, and close them. 
+
 
 
 ## Current limitations 
