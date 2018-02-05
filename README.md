@@ -51,7 +51,7 @@ Run an action or activation in a local docker container. Provide input with `-p`
 ```
 
 
-## Trouble shooting 
+## Troubleshooting 
 If you see an error like
 ```
 Error: (HTTP code 500) server error - driver failed programming external connectivity on endpoint shell-local (21466e1d857f1d1132266a786a1498c0a5cab73a6843f7578faeb9a336451d2b): Bind for 0.0.0.0:8080 failed: port is already allocated 
