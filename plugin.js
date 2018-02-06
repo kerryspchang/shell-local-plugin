@@ -148,7 +148,8 @@ const local = wsk => (_a, _b, fullArgv, modules, rawCommandString, _2, argvWitho
                 const start = Date.now()
 
                 const stopDebugger = () => {
-                    $('#debuggerDiv').remove();
+                    $('#debuggerDiv').remove()
+                    ui.clearSelection()
                 }
 
                 modes.push({ mode: 'stop-debugger', label: strings.stopDebugger, actAsButton: true,
@@ -324,7 +325,7 @@ const init = (kind, spinnerDiv) => {
                
 
                 //let Image = 'openwhisk/action-nodejs-v8';   // need to use kind here to get the right image
-                //appendIncreContent('Starting Docker container', spinnerDiv);
+                //appendIncreContent('Starting container', spinnerDiv);
                 //return docker.container.create(Object.assign({Image: image}, dockerConfig))
             }            
         }) 
@@ -363,7 +364,7 @@ const init = (kind, spinnerDiv) => {
                 return Promise.resolve(d);
             }
             else{                
-                appendIncreContent('Starting Docker container', spinnerDiv);
+                appendIncreContent('Starting docker container', spinnerDiv);
                 return docker.container.create(Object.assign({Image: d[0]}, dockerConfig))
             }
         })             
