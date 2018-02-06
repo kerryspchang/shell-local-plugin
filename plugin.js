@@ -90,21 +90,21 @@ const local = wsk => (_a, _b, fullArgv, modules, rawCommandString, _2, argvWitho
         if(argvWithoutOptions[0] && argvWithoutOptions[0] != 'local'){
             argvWithoutOptions.unshift('local');
         }
-        if(argvWithoutOptions.length == 1){            
+        if(argvWithoutOptions.length === 1){            
             resolve(printDocs());
         }
         else if(Object.keys(docs).indexOf(argvWithoutOptions[1]) < 1){
             // missing wil be -1, 'overall' will be 0. so none of that
             resolve(printDocs());
         }
-        else if(argvWithoutOptions.length == 2){
+        else if(argvWithoutOptions.length === 2){
             resolve(printDocs(argvWithoutOptions[1]));
         }       
         else{
             let input = {};
             for(var i=2; i<fullArgv.length; i++){
                 let addIndex = 0;
-                if(fullArgv[i] == '-p' && fullArgv[i+1] && fullArgv[i+1] != '-p'){
+                if(fullArgv[i] === '-p' && fullArgv[i+1] && fullArgv[i+1] != '-p'){
                     addIndex++;
                     if(fullArgv[i+2] && fullArgv[i+2] != '-p'){
                         input[fullArgv[i+1]] = fullArgv[i+2];
@@ -120,7 +120,7 @@ const local = wsk => (_a, _b, fullArgv, modules, rawCommandString, _2, argvWitho
             // determine bottom bar modes based on the command
             let modes = []
 
-            if(argvWithoutOptions[1] == 'play'){ 
+            if(argvWithoutOptions[1] === 'play'){ 
                 let d
 
                 // when the local activation started
@@ -141,7 +141,7 @@ const local = wsk => (_a, _b, fullArgv, modules, rawCommandString, _2, argvWitho
                         removeSpinner(returnDiv)
                     })
             }
-            else if(argvWithoutOptions[1] == 'debug'){
+            else if(argvWithoutOptions[1] === 'debug'){
                 let d
 
                 // when the debug session started
@@ -160,7 +160,7 @@ const local = wsk => (_a, _b, fullArgv, modules, rawCommandString, _2, argvWitho
                 .then(updateSidecarHeader('debugger'))
                 .then(data => {d = data; return getActionCode(data.name, spinnerDiv)})  // data: {code, kind}
                 .then(data => {
-                    if(data.kind.indexOf('node') == -1){
+                    if(data.kind.indexOf('node') === -1){
                         // not a node action - return
                         return Promise.reject('Currently, debugging support is limited to nodejs actions');
                     }
@@ -171,7 +171,7 @@ const local = wsk => (_a, _b, fullArgv, modules, rawCommandString, _2, argvWitho
                     }
                     
                 })
-                .then(() => runActionDebugger(d.name, d.code, d.kind, Object.assign({}, d.input, input), modules, spinnerDiv, returnDiv))
+                .then(() => runActionDebugger(d.name, d.code, d.kind, Object.assign({}, d.input, input), modules, spinnerDiv, returnDiv, dashOptions))
                 .then(res => displayAsActivation('debug session', d, start, wsk, res))
                 .then(stopDebugger)
                 .then(() => debug('debug session done', result))
@@ -181,7 +181,7 @@ const local = wsk => (_a, _b, fullArgv, modules, rawCommandString, _2, argvWitho
                     reject(e)
                 });
             }
-            else if(argvWithoutOptions[1] == 'init'){                
+            else if(argvWithoutOptions[1] === 'init'){                
                 getImageDir(spinnerDiv)
                 .then(() => init(spinnerDiv))
                 .then(() => {
@@ -193,7 +193,7 @@ const local = wsk => (_a, _b, fullArgv, modules, rawCommandString, _2, argvWitho
                     removeSpinner(returnDiv)
                 });
             }
-            else if(argvWithoutOptions[1] == 'kill'){
+            else if(argvWithoutOptions[1] === 'kill'){
                 appendIncreContent('Stopping and removing the container', spinnerDiv);
                 kill(returnDiv)
                 .then(() => {
@@ -402,7 +402,7 @@ const getActionNameAndInputFromActivations = (actId, spinnerDiv) => {
             let name = d.name;
             if(d.annotations && Array.isArray(d.annotations)){
                 d.annotations.forEach(a => {
-                    if(a.key == 'path')
+                    if(a.key === 'path')
                         name = a.value;
                 })
             }           
@@ -410,7 +410,7 @@ const getActionNameAndInputFromActivations = (actId, spinnerDiv) => {
         })
         .then(arr => {
             let a = [arr[0]];   
-            if(arr.length == 2 && arr[1] != undefined){
+            if(arr.length === 2 && arr[1] !== undefined){
                 if(arr[1].logs.indexOf(actId) > 0){
                     // get the previous activation if there's any
                     a.push(repl.qexec(`wsk activation get ${arr[1].logs[arr[1].logs.indexOf(actId)-1]}`))
@@ -606,7 +606,7 @@ const runActionInDocker = (functionCode, functionKind, functionInput, spinnerDiv
  * Run the given code inside a local debugging session
  *
  */
-const runActionDebugger = (actionName, functionCode, functionKind, functionInput, { ui }, spinnerDiv, returnDiv) => new Promise((resolve, reject) => {
+const runActionDebugger = (actionName, functionCode, functionKind, functionInput, { ui }, spinnerDiv, returnDiv, dashOptions) => new Promise((resolve, reject) => {
     // this specifies a path inside docker container, so we should not
     // need to worry about hard-coding something here
     const resultFilePath = '/tmp/debug-session.out'
@@ -686,7 +686,7 @@ const runActionDebugger = (actionName, functionCode, functionKind, functionInput
  *
  */
 const appendIncreContent = (content, div, error) => {
-    if(div == undefined){
+    if(div === undefined){
         console.error('Error: content div undefined. content='+content);
         return;
     }
@@ -703,7 +703,7 @@ const appendIncreContent = (content, div, error) => {
         $(div).find('.replay_output').append(`<div style='color:red;'>${message}</div>`);
     }
     else if(typeof content === 'string') {
-        $(div).find('.replay_output').append(`<div>${content}</div>`);
+        $(div).find('.replay_output').append(`<div style='padding-top:0.25ex'>${content}</div>`);
     } else if(content.response){
          $(div).find('.replay_output').append(`<div><span style="white-space:pre;">${JSON.stringify(content, null, 4)}<span></div>`);
     }
