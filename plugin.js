@@ -61,12 +61,14 @@ let _container, _containerType, _containerCode, _imageDir, _image;
 module.exports = (commandTree, prequire) => {
     const wsk = prequire('/ui/commands/openwhisk-core')
     const handler = local(wsk)
-   
+
     commandTree.listen('/local', handler, Object.assign({docs: docs.overall}, commandOptions));
     commandTree.listen('/local/play', handler, Object.assign({docs: docs.play}, commandOptions));
     commandTree.listen('/local/debug', handler, Object.assign({docs: docs.debug}, commandOptions));
     commandTree.listen('/local/init', handler, Object.assign({docs: docs.init}, commandOptions));
     commandTree.listen('/local/kill', handler, Object.assign({docs: docs.kill}, commandOptions));
+
+    registerInvokeDashLocal(commandTree, prequire, wsk, handler)
 
     if(typeof document === 'undefined' || typeof window === 'undefined') return; 
     
@@ -79,6 +81,42 @@ module.exports = (commandTree, prequire) => {
 }
 
 /**
+ * Add a --local/-l option to action invoke
+ *
+ */
+const registerInvokeDashLocal = (commandTree, prequire, wsk, local) => {
+    prequire('/openwhisk-extensions/actions/invoke')
+    const rawInvoke = commandTree.find('/wsk/actions/invoke') // this is the command impl we're overriding, we'll delegate to it
+
+    const syncInvoke = function() {
+        const dashOptions = arguments[arguments.length - 1]
+
+        if (dashOptions.d || dashOptions.local) {
+            // then we were asked to do a local invoke
+            const fullArgv = arguments[2],
+                  { argv } = wsk.parseOptions(fullArgv.slice(), 'action'),
+                  opt = dashOptions.d ? 'd' : 'local',
+                  action = typeof dashOptions[opt] === 'string' ? dashOptions[opt] : argv[argv.indexOf('invoke') + 1]
+
+            arguments[arguments.length - 2] = ['play', action]
+
+            delete dashOptions.d
+            delete dashOptions.local
+
+            return local.apply(undefined, arguments)
+
+        } else {
+            // otherwise, delegate
+            return rawInvoke.$.apply(undefined, arguments)
+        }
+    }
+
+    wsk.synonyms('actions').forEach(syn => {
+        const x = commandTree.listen(`/wsk/${syn}/invoke`, syncInvoke, { docs: 'Invoke an action' })
+    })
+}
+
+/**
  * Main command handler routine
  *
  */
@@ -86,7 +124,6 @@ const local = wsk => (_a, _b, fullArgv, modules, rawCommandString, _2, argvWitho
     const { ui } = modules
 
     return new Promise((resolve, reject) => {  
-        
         if(argvWithoutOptions[0] && argvWithoutOptions[0] != 'local'){
             argvWithoutOptions.unshift('local');
         }
