@@ -23,6 +23,7 @@
     "fs-extra": "^5.0.0",
     "jquery": "^3.3.1",
     "node-docker-api": "^1.1.21",
-    "requestretry": "^1.13.0"
+    "requestretry": "^1.13.0",
+    "tmp": "0.0.33"
   }
 }

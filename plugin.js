@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 IBM Corporation
+ * Copyright 2018 IBM Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,49 +14,38 @@
  * limitations under the License.
  */
 
-const {Docker} = require('node-docker-api'),    
-    docker = new Docker(),
-    $ = require('jquery'),
-    rt = require('requestretry'),        
-    fs = require('fs-extra');
+const debug = require('debug')('local plugin')
+debug('loading')
+
+const { Docker } = require('node-docker-api'),
+      dockerConfig = require('./config'),
+      docs = require('./docs'),
+      { kindToExtension } = require('./kinds'),
+      docker = new Docker(),
+      $ = require('jquery'),
+      rt = require('requestretry'),        
+      fs = require('fs-extra'),
+      tmp = require('tmp')
+
+debug('modules loaded')
+
+/** log terminal marker in openwhisk */
+const MARKER = '&XXX_THE_END_OF_A_WHISK_ACTIVATION_XXX'
+
+const strings = {
+    stopDebugger: 'Done Debugging'
+}
 
 const dontCreateContainer = "don't create container",
     skipInit = "skip initialization",
     dontShutDownContainer = "don't shut down container",
-    htmlIncre = '<div style="color: black"><div class="replay_output" style="white-space:pre-wrap;"></div><div class="replay_spinner" style="animation: spin 750ms linear infinite; height:15px; width:10px; margin: 5px 0px 0px 2px;"> | </div></div>',
-    debugFileName = 'shell-debug.js',
+    htmlIncre = '<div style="-webkit-app-region: no-drag; flex: 1; display: flex"></div>',
+    spinnerContent ='<div style="display: flex; flex: 1; justify-content: center; align-items: center; font-size: 1.5em"><div class="replay_output" style="order:2;margin-left: 1rem;"></div><div class="replay_spinner" style="animation: spin 2s linear infinite; font-size: 5em; color: var(--color-support-02);"><i class="fas fa-cog"></i></div></div></div>',
     debuggerURL = 'chrome-devtools://devtools/bundled/inspector.html?experiments=true&v8only=true&ws=0.0.0.0:5858';
-
-// config for the docker container 
-const dockerConfig = {         
-    ExposedPorts: {
-        "8080/tcp": {}, // 8080 is the port for api communications 
-        "5858/tcp": {}  // 5858 is the port for node debugger 
-    },
-    HostConfig:{
-        PortBindings: {
-            "8080/tcp": [
-                    { "HostPort": "8080"}
-            ],
-            "5858/tcp": [
-                    { "HostPort": "5858"}
-            ]
-        }
-    },
-    name: "shell-local"          
-};
 
 const uuidPattern = /^[0-9a-f]{32}$/;
 
- // Docs for the plugin - total four commands     
-const docs = {
-    overall:  `<div>This plugin lets you run actions in a local Docker container for testing and debugging purposes. <br/>It requires Docker to be pre-installed in your machine.<br/><br/></div>`,
-    play: '<div><b>local play <i>action_name_or_activation_id</i> [-p name value]</b>: Run an action or activation locally. When replaying an activation, the plugin will fetch its previous activation (if available) to get the input data. You can also provide the input data with -p. Return the output and execution time.</div>',
-    debug: '<div><b>local debug <i>action_name_or_activation_id</i> [-p name value]</b>: **Only for NodeJs** Run an action or activation locally, and open Chrome DevTool in the sidecar for live debugging. Return the output.</div>',
-    init: '<div><b>local init <i>action_name</i></b>: Start a Docker container with the runtime image of an action (but not yet execute the action). This command is mostly used internally by Shell.</div>',
-    kill: `<div><b>local kill container</b>: Kill and remove the Docker container this plugin uses. This command is mostly used internally by Shell. The container is removed automatically when you exit Shell.</div>`
-}
-
+/** common execOptions for all of the commands */
 const commandOptions = {
     needsUI: true,
     fullscreen: false, //width: 800, height: 600,
@@ -70,12 +59,14 @@ let _container, _containerType, _containerCode, _imageDir, _image;
 
 
 module.exports = (commandTree, prequire) => {
+    const wsk = prequire('/ui/commands/openwhisk-core')
+    const handler = local(wsk)
    
-    commandTree.listen('/local', local, Object.assign({docs: docs.overall}, commandOptions));
-    commandTree.listen('/local/play', local, Object.assign({docs: docs.play}, commandOptions));
-    commandTree.listen('/local/debug', local, Object.assign({docs: docs.debug}, commandOptions));
-    commandTree.listen('/local/init', local, Object.assign({docs: docs.init}, commandOptions));
-    commandTree.listen('/local/kill', local, Object.assign({docs: docs.kill}, commandOptions));
+    commandTree.listen('/local', handler, Object.assign({docs: docs.overall}, commandOptions));
+    commandTree.listen('/local/play', handler, Object.assign({docs: docs.play}, commandOptions));
+    commandTree.listen('/local/debug', handler, Object.assign({docs: docs.debug}, commandOptions));
+    commandTree.listen('/local/init', handler, Object.assign({docs: docs.init}, commandOptions));
+    commandTree.listen('/local/kill', handler, Object.assign({docs: docs.kill}, commandOptions));
 
     if(typeof document === 'undefined' || typeof window === 'undefined') return; 
     
@@ -87,14 +78,18 @@ module.exports = (commandTree, prequire) => {
     });   
 }
 
-const local = (_a, _b, fullArgv, _1, rawCommandString, _2, argvWithoutOptions, dashOptions) => {    
+/**
+ * Main command handler routine
+ *
+ */
+const local = wsk => (_a, _b, fullArgv, modules, rawCommandString, _2, argvWithoutOptions, dashOptions) => {    
+    const { ui } = modules
 
     return new Promise((resolve, reject) => {  
         
         if(argvWithoutOptions[0] && argvWithoutOptions[0] != 'local'){
             argvWithoutOptions.unshift('local');
         }
-        console.log(argvWithoutOptions);    
         if(argvWithoutOptions.length == 1){            
             resolve(printDocs());
         }
@@ -119,138 +114,146 @@ const local = (_a, _b, fullArgv, _1, rawCommandString, _2, argvWithoutOptions, d
                 i += addIndex;
             }
 
-            let returnDiv = $(htmlIncre);
+            const returnDiv = $(htmlIncre),
+                  spinnerDiv = $(returnDiv).append(spinnerContent)
 
-            resolve(returnDiv[0]);
+            // determine bottom bar modes based on the command
+            let modes = []
 
             if(argvWithoutOptions[1] == 'play'){ 
-                let d, p
-                if(argvWithoutOptions[2].trim().match(uuidPattern)){
-                    p = getActionNameAndInputFromActivations(argvWithoutOptions[2], returnDiv);
-                }
-                else{
-                    p = Promise.resolve({name: argvWithoutOptions[2], input: {}});
-                }
+                let d
 
-                getImageDir(returnDiv)
-                .then(() => p)  // data: {name, input}
-                .then(data => {d = data; return getActionCode(data.name, returnDiv)})   // data: code, kind
-                .then(data => {d = Object.assign({}, d, data); return init(d.kind, returnDiv)})
-                .then(() => runActionInDocker(d.code, d.kind, Object.assign({}, d.input, input), returnDiv))  
-                .then(data => { // data: {init_time, execution_time, result}
-                    appendIncreContent('Done.', returnDiv);
-                    appendIncreContent(data, returnDiv);
-                    removeSpinner(returnDiv);
-                })  
-                .catch(e => {
-                    console.log(e);
-                    appendIncreContent(e, returnDiv, 'error')
-                    removeSpinner(returnDiv)
-                })    
+                // when the local activation started
+                const start = Date.now()
 
-            }   
+                Promise.all([getActionNameAndInputFromActivations(argvWithoutOptions[2], spinnerDiv),
+                             getImageDir(spinnerDiv)])
+                    .then(([data]) => data)
+                    .then(updateSidecarHeader('local invoke'))
+                    .then(data => {d = data; return getActionCode(data.name, spinnerDiv)})   // data: code, kind
+                    .then(data => {d = Object.assign({}, d, data)})
+                    .then(() => init(d.kind, spinnerDiv))
+                    .then(() => runActionInDocker(d.code, d.kind, Object.assign({}, d.input, input), spinnerDiv))  
+                    .then(res => displayAsActivation('local activation', d, start, wsk, res))
+                    .catch(e => {
+                        console.error(e)
+                        appendIncreContent(e, spinnerDiv, 'error')
+                        removeSpinner(returnDiv)
+                    })
+            }
             else if(argvWithoutOptions[1] == 'debug'){
-                let d, p;
-                //if(argvWithoutOptions[2].length == 32){ // simple check if this is an activation
-                if(argvWithoutOptions[2].trim().match(uuidPattern)){
-                    p = getActionNameAndInputFromActivations(argvWithoutOptions[2], returnDiv);
-                }
-                else{
-                    p = Promise.resolve({name: argvWithoutOptions[2], input: {}});
+                let d
+
+                // when the debug session started
+                const start = Date.now()
+
+                const stopDebugger = () => {
+                    $('#debuggerDiv').remove();
                 }
 
-                getImageDir(returnDiv)
-                .then(() => p)
-                .then(data => {d = data; return getActionCode(data.name, returnDiv)})  // data: {code, kind}
+                modes.push({ mode: 'stop-debugger', label: strings.stopDebugger, actAsButton: true,
+                             direct: stopDebugger })
+
+                Promise.all([getActionNameAndInputFromActivations(argvWithoutOptions[2], spinnerDiv),
+                             getImageDir(spinnerDiv)])
+                .then(([data]) => data)
+                .then(updateSidecarHeader('debugger'))
+                .then(data => {d = data; return getActionCode(data.name, spinnerDiv)})  // data: {code, kind}
                 .then(data => {
                     if(data.kind.indexOf('node') == -1){
                         // not a node action - return
-                        return Promise.reject('This is not a nodejs action.');
+                        return Promise.reject('Currently, debugging support is limited to nodejs actions');
                     }
                     else{
                         data.kind = "nodejs:8";    // debugger only works for nodejs:8
                         d = Object.assign({}, d, data);
-                        return init(d.kind, returnDiv);
+                        return init(d.kind, spinnerDiv);
                     }
                     
                 })
-                .then(() => runActionDebugger(d.code, d.kind, Object.assign({}, d.input, input), returnDiv))
-                .then(data => {
-                    appendIncreContent('Done.', returnDiv);
-                    $(data).children().remove('.oops');
-                    appendIncreContent(data, returnDiv);
-                    removeSpinner(returnDiv);
-                })
+                .then(() => runActionDebugger(d.name, d.code, d.kind, Object.assign({}, d.input, input), modules, spinnerDiv, returnDiv))
+                .then(res => displayAsActivation('debug session', d, start, wsk, res))
+                .then(stopDebugger)
+                .then(() => debug('debug session done', result))
                 .catch(e => {
-                    appendIncreContent(e, returnDiv, 'error')
+                    appendIncreContent(e, spinnerDiv, 'error')
                     removeSpinner(returnDiv)
+                    reject(e)
                 });
             }
             else if(argvWithoutOptions[1] == 'init'){                
-                getImageDir(returnDiv)
-                .then(() => init(returnDiv))
+                getImageDir(spinnerDiv)
+                .then(() => init(spinnerDiv))
                 .then(() => {
-                    appendIncreContent('Done', returnDiv)
+                    appendIncreContent('Done', spinnerDiv)
                     removeSpinner(returnDiv);
                 })
                 .catch(e => {
-                    appendIncreContent(e, returnDiv, 'error')
+                    appendIncreContent(e, spinnerDiv, 'error')
                     removeSpinner(returnDiv)
                 });
             }
             else if(argvWithoutOptions[1] == 'kill'){
-                appendIncreContent('Stopping and removing the container...', returnDiv);
+                appendIncreContent('Stopping and removing the container', spinnerDiv);
                 kill(returnDiv)
                 .then(() => {
-                    appendIncreContent('Done', returnDiv)
+                    appendIncreContent('Done', spinnerDiv)
                     removeSpinner(returnDiv);
                 })
                 .catch(e => {
-                    appendIncreContent(e, returnDiv, 'error')
+                    appendIncreContent(e, spinnerDiv, 'error')
                     removeSpinner(returnDiv)
                 });
-            }            
+            }
+
+            resolve({
+                type: 'custom',
+                content: returnDiv[0],
+                modes
+            })
         }
 
     });
-}
+} /* end of local */
 
-const getImageDir = (returnDiv) => {
+/**
+ * Call the OpenWhisk API to retrieve the list of docker base
+ * images. The result will be cached in the _imageDir variable.
+ *
+ */
+const getImageDir = spinnerDiv => {
+    if(_imageDir !== undefined) {
+        // we have cached it
+        return Promise.resolve(_imageDir)
+    } else {
+        // we haven't cached it, yet
+        debug('get image locations')
 
-    return new Promise((resolve, reject) => {
-        if(_imageDir == undefined){
-            repl.qexec('host get')
+        return repl.qexec('host get')
             .then(data => {
                 if(data.indexOf('http') != 0){
                     data = 'https://'+data;
                 }
+
+                debug('get image locations:remote call')
                 return rt({
                     method: 'get',
+                    rejectUnauthorized: false, // TODO we need to pull this from `wsk`
                     url : data,    
                     json: true
                 });
             })
-            .then(data => {
-                console.log(data);
-                _imageDir = data.body.runtimes;
-                resolve(true);
-            })
-            .catch(e => {
-                console.log(e);
-                reject(e);
-            });
-            
-        }  
-        else{
-            resolve(true);
-        }  
-
-    });
+            .then(data => _imageDir = data.body.runtimes)
+    }
 }
 
-const kill = (returnDiv) => {
+/**
+ * Kill the current local docker container
+ *
+ */
+const kill = spinnerDiv => {
     return new Promise((resolve, reject) => {
-        console.log('stopping the container');        
+        debug('stopping the container');        
         if(_container){
             // if in this session there's a container started, remove it. 
             _container.stop()
@@ -284,22 +287,26 @@ const kill = (returnDiv) => {
     });
 }
 
-const init = (kind, returnDiv) => {
+/**
+ * Initialize a local docker container
+ *
+ */
+const init = (kind, spinnerDiv) => {
     return new Promise((resolve, reject) => {
 
         new Promise((resolve, reject) => {   
 
-            console.log(_containerType, kind, _container)         
+            debug('init', _containerType, kind, _container)         
             
             if(_container && (_containerType && _containerType === kind)){
                 // only in one condition that we will reuse a container, is in the same shell session the same kind of action being invoked 
-                console.log('reuse the current container');
+                debug('reusing the current container');
                 resolve(dontCreateContainer);
             }
             else{
-                console.log('stopping the container');
+                debug('stopping the container');
                 // for all other cases, stop and delete the container, reopen a new one
-                kill(returnDiv)
+                kill(spinnerDiv)
                 .then(d => resolve(d))
                 .catch(e => resolve(e));                
 
@@ -317,7 +324,7 @@ const init = (kind, returnDiv) => {
                
 
                 //let Image = 'openwhisk/action-nodejs-v8';   // need to use kind here to get the right image
-                //appendIncreContent('Starting a Docker container...', returnDiv);
+                //appendIncreContent('Starting Docker container', spinnerDiv);
                 //return docker.container.create(Object.assign({Image: image}, dockerConfig))
             }            
         }) 
@@ -336,16 +343,17 @@ const init = (kind, returnDiv) => {
                         });
                     });
                 }
-                console.log('Image should used: '+image);      
 
-                let imageLabel = image.indexOf(':latest') != -1 ? image.substring(0, image.indexOf(':latest')) : image;
+                debug('using image', image)
+
+                const imageLabel = image.indexOf(':latest') != -1 ? image.substring(0, image.indexOf(':latest')) : image;
                 
                 if($(d).html().indexOf(imageLabel) != -1){
-                    console.log('Image already exist. No need to pull');
+                    debug('Image already exist. No need to pull');
                     return Promise.all([Promise.resolve(image)]);
                 }
                 else{
-                    appendIncreContent(`Pulling ${kind} runtime docker image... This is a one-time thing.`, returnDiv);
+                    appendIncreContent(`Pulling ${kind} runtime docker image (one-time init)`, spinnerDiv);
                     return Promise.all([Promise.resolve(image), repl.qexec(`! docker pull ${image}`)]);
                 }
             }
@@ -355,32 +363,42 @@ const init = (kind, returnDiv) => {
                 return Promise.resolve(d);
             }
             else{                
-                appendIncreContent('Starting a Docker container...', returnDiv);
+                appendIncreContent('Starting Docker container', spinnerDiv);
                 return docker.container.create(Object.assign({Image: d[0]}, dockerConfig))
             }
         })             
         .then(d => {
             if(d === dontCreateContainer){
-                return Promise.resolve(d);
+                return Promise.resolve(_container);
             }
             else{
                 _container = d; 
                 _containerType = kind;            
                 return _container.start(); 
-            }            
+            }
         })
+        .then(setupLogs)
         .then(() => resolve(true))
         .catch((e => reject(e)));
     });
 }
 
-const getActionNameAndInputFromActivations = (actId, returnDiv) => {
-    appendIncreContent('Retriving activations...', returnDiv);
+/**
+ * Given an activation id, determine the action name and (if possible)
+ * input data for that activation.
+ *
+ */
+const getActionNameAndInputFromActivations = (actId, spinnerDiv) => {
+    if(!actId.trim().match(uuidPattern)) {
+        // then actId is really an action name, so there's nothing to do here
+        return Promise.resolve({name: actId, input: {}});
+    }
+
+    appendIncreContent('Retrieving activations', spinnerDiv);
     return new Promise((resolve, reject) => {
         repl.qexec(`wsk activation get ${actId}`)
         .then(d => {            
-            //appendIncreContent(returnDiv, 'Retriving the action code...'); 
-            console.log(d);
+            //appendIncreContent('Retrieving the action code', spinnerDiv); 
             let name = d.name;
             if(d.annotations && Array.isArray(d.annotations)){
                 d.annotations.forEach(a => {
@@ -391,10 +409,8 @@ const getActionNameAndInputFromActivations = (actId, returnDiv) => {
             return Promise.all([name, d.cause ? repl.qexec(`wsk activation get ${d.cause}`) : undefined ])
         })
         .then(arr => {
-            console.log(arr);
             let a = [arr[0]];   
             if(arr.length == 2 && arr[1] != undefined){
-                console.log(arr[1].logs.indexOf(actId));
                 if(arr[1].logs.indexOf(actId) > 0){
                     // get the previous activation if there's any
                     a.push(repl.qexec(`wsk activation get ${arr[1].logs[arr[1].logs.indexOf(actId)-1]}`))
@@ -410,19 +426,20 @@ const getActionNameAndInputFromActivations = (actId, returnDiv) => {
         
 }
 
-const getActionCode = (actionName, returnDiv) => {
-    return new Promise((resolve, reject) => {
-        appendIncreContent('Retriving action code...', returnDiv);
-        repl.qexec(`wsk action get ${actionName}`)
-        .then(d => {
-            console.log(d);
-            resolve({code: d.exec.code, kind: d.exec.kind});
-        })
-        .catch(e => reject(e));
-    });
+/**
+ * Fetches the code for a given action
+ *
+ */
+const getActionCode = (actionName, spinnerDiv) => {
+    appendIncreContent('Retrieving action code', spinnerDiv);
+    return repl.qexec(`wsk action get ${actionName}`)
+        .then(action => action.exec)
 }
 
-
+/**
+ * Returns a DOM that documents this plugin
+ *
+ */
 const printDocs = (name) => {
     if(name && docs[name]){
         return $(docs[name])[0];
@@ -438,7 +455,82 @@ const printDocs = (name) => {
     }
 }
 
-const runActionInDocker = (functionCode, functionKind, functionInput, returnDiv) => {
+/**
+ * Fetch logs from the current container
+ *
+ */
+const setupLogs = container => {
+    debug('setup logs')
+
+    const { skip=0 } = container
+    container.skip += 2 // two end markers per invoke
+
+    if (!container.logger) {
+        container.logger = container.logs({
+            follow: true,
+            stdout: true,
+            stderr: true
+        })
+            .then(stream => {
+                stream.on('data', info => {
+                    const lines = info.toString().replace(/\n$/,'').split(/\n/) // remove trailing newline
+                    let soFar = 0
+
+                    const first = lines.indexOf(_ => _.indexOf(MARKER) >= 0),
+                          slicey = first >= 0 && lines.length > 2 ? slicey + 1 : 0
+
+                    lines.slice(slicey).forEach(line => {
+                        if (line.indexOf(MARKER) >= 0) {
+                            //if (soFar++ >= skip) {
+                                // oh great, we found the end marker, which means we're done!
+                                debug('logs are done', container.logLines)
+                                container.logLineResolve(container.logLines)
+                        //}
+                        } else /*if (soFar >= skip)*/ {
+                            // then we haven't reached the end marker, yet
+                            debug('log line', line)
+                            container.logLines.push(logLine('stdout', line))
+                        }
+                    })
+                })
+                stream.on('error', err => container.logLines.push(logLine('stderr', err)))
+            }).catch(container.logLineReject)
+    }
+
+    container.logLinesP = new Promise((resolve, reject) => {
+        container.logLines = []
+        container.logLineResolve = resolve
+        container.logLineReject = reject
+    })
+}
+
+/**
+ * Use the bits established by setupLogs to create a { result, logs } structure
+ *
+ */
+const fetchLogs = container => result => {
+    debug('fetch logs')
+    if (container.logLinesP) {
+        return container.logLinesP
+            .then(logs => ({ result, logs }))
+            .catch(err => {
+                // something bad happened collecting the logs
+                console.error(err)
+                return { result, logs: [] }
+            })
+    } else {
+        return { result, logs: [] }
+    }
+}
+
+/**
+ * Run the given code in a local docker container. We use the /init
+ * and /run REST API offered by the container. If the /init call has
+ * already been made, e.g. for repeated local invocations of the same
+ * action, we can avoid calling /init again.
+ *
+ */
+const runActionInDocker = (functionCode, functionKind, functionInput, spinnerDiv) => {
     let start, init, run, end;
     return new Promise((resolve, reject) => {
         let p;
@@ -446,8 +538,8 @@ const runActionInDocker = (functionCode, functionKind, functionInput, returnDiv)
             p = Promise.resolve(skipInit);
         } 
         else{
-            console.log(_container);
-            appendIncreContent('Initalizing the action in container...', returnDiv);
+            //console.log(_container);
+            appendIncreContent('Initializing the action', spinnerDiv);
             start = Date.now();
             p = rt({
                 method: 'post',
@@ -470,43 +562,39 @@ const runActionInDocker = (functionCode, functionKind, functionInput, returnDiv)
         p.then(() => {
             _containerCode = functionCode;
             init = Date.now();
-            appendIncreContent('Running the action...', returnDiv);
+            appendIncreContent('Running the action', spinnerDiv);
             run = Date.now();
             return rt({
                 method: 'post',
-                url : 'http://localhost:8080/' + 'run',
+                url: 'http://localhost:8080/' + 'run',
                 agentOptions : {
-                    rejectUnauthorized : false
+                    rejectUnauthorized: false
                 },
-                headers : {
-                'Content-Type' : 'application/json',
+                headers: {
+                    'Content-Type' : 'application/json',
                 },
-                json : {
+                json: {
                     value: functionInput
                 }
-            });
+            })
         })
-        .then((data) => {            
-            end = Date.now();
-            outputData = data;
-            console.log(data);
+        .then(fetchLogs(_container))
+        .then(({ result, logs }) => {
             resolve({
                 init_time: start ? init-start : undefined,
-                execution_time: end-run,
-                response: outputData.body
+                result: result.body, logs
             })
         })        
         .catch(error => {          
-            
             if(_container && _container.stop && _container.delete){
-                console.log(error);
-                kill(returnDiv).then(() => {
-                    appendIncreContent('Done', returnDiv);
+                console.error(error);
+                kill(spinnerDiv).then(() => {
+                    //appendIncreContent('Done', spinnerDiv);
                     reject(error);
                 }).catch(e => reject(e));                                   
             }                
             else{
-                console.log(error);
+                console.error(error);
                 reject(error);
             }
             
@@ -514,54 +602,92 @@ const runActionInDocker = (functionCode, functionKind, functionInput, returnDiv)
     });
 }
 
-const runActionDebugger = (functionCode, functionKind, functionInput, returnDiv) => {
-    let fileCode = `\n\n${functionCode}\n\nconsole.log('Result:');\nconsole.log(JSON.stringify(main(${JSON.stringify(functionInput)}), null, 4));\n`;
+/**
+ * Run the given code inside a local debugging session
+ *
+ */
+const runActionDebugger = (actionName, functionCode, functionKind, functionInput, { ui }, spinnerDiv, returnDiv) => new Promise((resolve, reject) => {
+    // this specifies a path inside docker container, so we should not
+    // need to worry about hard-coding something here
+    const resultFilePath = '/tmp/debug-session.out'
 
-    return fs.outputFile('./'+debugFileName, fileCode)
-    .then(() => repl.qexec(`! docker cp ./${debugFileName} shell-local:/nodejsAction/${debugFileName}`))
-    .then(() => fs.remove('./'+debugFileName))
-    .then(() => {
-        appendIncreContent('Starting the debugger...', returnDiv);
-        run = Date.now();
-        let x = repl.qexec(`! docker exec shell-local node --inspect-brk=0.0.0.0:5858 ${debugFileName}`);
+    // we need to amend the functionCode with a prolog that write the result somewhere we can find
+    const fileCode = `\n\n${functionCode}\n\nrequire('fs').writeFileSync('${resultFilePath}', JSON.stringify(main(${JSON.stringify(functionInput)}), null, 4))\n`;
 
-        rt({
-                method: 'get',
-                url : 'http://0.0.0.0:5858/json',    
-                json: true
+    // note that we use the action's name (e.g. myAction.js) as the
+    // file name, so that it appears nicely in call stacks and other
+    // line numbery displays in the debugger
+    const debugFileName = actionName.substring(actionName.lastIndexOf('/') + 1)
+          + (kindToExtension[functionKind.replace(/:.*$/,'')] || '')
 
-        }).then(data => {            
-            console.log(data);
-            if(data && data.body && data.body.length > 0 && data.body[0].devtoolsFrontendUrl){
-                let backtag = data.body[0].devtoolsFrontendUrl.substring(data.body[0].devtoolsFrontendUrl.lastIndexOf('/'));
-                const webview = $(`<div id="debuggerDiv" style="width:100%; height:100%"><webview src="${debuggerURL}${backtag}" style="width:100%; height:100%"></webview></div>`);
-
-                ui.showCustom({content: $(webview)[0], sidecarHeader: false});
-
-                $(webview).mouseup(e => {e.stopPropagation();})
-
-                appendIncreContent('Press ESC to close the inspector after debugging...', returnDiv);
-                let x = function(e){
-                    if(e.keyCode == 27){    //ESC
-                        $('#debuggerDiv').remove();                            
-                        $(document).off('keydown', x);                            
-                        console.log('remove debugger');
-                    }
+    //
+    // write out our function code, copy it into the docker container,
+    // then spawn the debugger, and finally wait for the debug session
+    // to complete; at that point, we resolve with { result, logs }
+    //
+    writeToTempFile(fileCode).then(({tmpPath, cleanupCallback}) => {                     // write fileCode to local temp file
+        repl.qexec(`! docker cp ${tmpPath} shell-local:/nodejsAction/${debugFileName}`)  // copy temp file into container
+            .then(() => appendIncreContent('Starting the debugger', spinnerDiv))         // status update
+            .then(() => {
+                // this is where we launch the local debugger, and wait for it to terminate
+                // as to why we need to hack for the Waiting for debugger on stderr:
+                // https://bugs.chromium.org/p/chromium/issues/detail?id=706916
+                const logLines = []
+                repl.qexec(`! docker exec shell-local node --inspect-brk=0.0.0.0:5858 ${debugFileName}`, undefined, undefined,
+                           { stdout: line => logLines.push(logLine('stdout', line)),
+                             stderr: line => {
+                               if (line.indexOf('Waiting for the debugger to disconnect') >= 0) {
+                                   repl.qexec(`! docker cp shell-local:${resultFilePath} ${tmpPath}`)
+                                       .then(() => fs.readFile(tmpPath))
+                                       .then(result => JSON.parse(result.toString()))
+                                       .then(result => { cleanupCallback(); return result; }) // clean up tmpPath
+                                       .then(result => resolve({ result,
+                                                                 logs: logLines }))
+                               } else if (line.indexOf('Debugger listening on') >= 0) {
+                                   // squash
+                               } else if (line.indexOf('For help see https://nodejs.org/en/docs/inspector') >= 0) {
+                                   // squash
+                               } else if (line.indexOf('Debugger attached') >= 0) {
+                                   // squash
+                               } else {
+                                   // otherwise, hopefully this is a legit application log line
+                                   logLines.push(logLine('stderr', line))
+                               }
+                           } }).catch(reject)
+            })
+            // now, we fetch the URL exported by the local debugger
+            // and use this URL to open a webview container around it
+            .then(() => rt({ method: 'get', url: 'http://0.0.0.0:5858/json', json: true}))   // fetch url...
+            .then(data => {
+                // here, we extract the relevant bits of the URL from the response
+                if(data && data.body && data.body.length > 0 && data.body[0].devtoolsFrontendUrl) {
+                    return data.body[0].devtoolsFrontendUrl.substring(data.body[0].devtoolsFrontendUrl.lastIndexOf('/'));
                 }
-                $(document).on('keydown', x);
-            }
+            })
+            .then(backtag => {
+                // and make webview container from it!
+                if (backtag) {
+                    // remove the spinnery bits
+                    ui.removeAllDomChildren(returnDiv[0])
 
-        })//.catch(e => reject(e));
+                    // create and attach the webview
+                    const webview = $(`<div id="debuggerDiv" style="flex: 1; display: flex"><webview style="flex:1" src="${debuggerURL}${backtag}" autosize="on"></webview></div>`);
+                    $(returnDiv).append(webview)
 
-        return x;
+                    // avoid the repl capturing mouse clicks
+                    $(webview).mouseup(e => {e.stopPropagation();})
+                }
+            })
+    })
+})
 
-    })    
-        
-};
-
+/**
+ * Add a status message
+ *
+ */
 const appendIncreContent = (content, div, error) => {
     if(div == undefined){
-        console.log('Error: content div undefined. content='+content);
+        console.error('Error: content div undefined. content='+content);
         return;
     }
 
@@ -574,15 +700,15 @@ const appendIncreContent = (content, div, error) => {
                 message = JSON.stringify(content, null, 4);
         }        
 
-        $(div).children('.replay_output').append(`<div style='color:red;'>${message}</div>`);
+        $(div).find('.replay_output').append(`<div style='color:red;'>${message}</div>`);
     }
-    else if(typeof content === 'string')
-        $(div).children('.replay_output').append(`<div>${content}</div>`);
-    else if(content.response){
-         $(div).children('.replay_output').append(`<div><span style="white-space:pre;">${JSON.stringify(content, null, 4)}<span></div>`);
+    else if(typeof content === 'string') {
+        $(div).find('.replay_output').append(`<div>${content}</div>`);
+    } else if(content.response){
+         $(div).find('.replay_output').append(`<div><span style="white-space:pre;">${JSON.stringify(content, null, 4)}<span></div>`);
     }
     else{        
-        $(div).children('.replay_output').append(content);
+        $(div).find('.replay_output').append(content);
     }
 
 }
@@ -593,4 +719,89 @@ const removeSpinner = (div) => {
 
 
 
+/**
+ * Update the sidecar header to reflect the given viewName and entity
+ * name stored in data.
+ *
+ */
+const updateSidecarHeader = viewName => data => {
+    const { name } = data,
+          split = name.split('/'),
+          packageName = split.length > 3 ? split[2] : undefined,
+          actionName = split[split.length - 1],
+          onclick = () => repl.pexec(`action get ${name}`)
 
+    ui.addNameToSidecarHeader(undefined, actionName, packageName, onclick, viewName)
+
+    data.actionName = actionName
+    data.packageName = packageName
+
+    return data
+}
+
+/**
+ * @return a timestamp compatible with OpenWhisk logs
+ *
+ */
+const timestamp = (date=new Date()) => date.toISOString()
+
+/**
+ * Make an OpenWhisk-compatible log line
+ *
+ */
+const logLine = (type, line) => `${timestamp()} stdout: ${line.toString()}`
+
+/**
+ * Write the given string to a temp file
+ *
+ * @return {tmpPath, cleanupCallback}
+ *
+ */
+const writeToTempFile = string => new Promise((resolve, reject) => {
+    tmp.file((err, tmpPath, fd, cleanupCallback) => {
+        if (err) {
+            console.error(res.err)
+            reject('Internal Error')
+        } else {
+            return fs.outputFile(tmpPath, string).then(() => resolve({tmpPath, cleanupCallback}))
+        }
+    })
+})
+
+/**
+*
+*
+*/
+const displayAsActivation = (sessionType, { kind, actionName, name }, start, { activationModes }, {result, logs, init_time}) => {
+    try {
+        // when the session ended
+        const end = Date.now()
+
+        const annotations = [ { key: 'path', value: `${namespace.current()}/${name}` },
+                              { key: 'kind', value: kind }]
+
+        if (init_time) {
+            // fake up an initTime annotation
+            annotations.push({ key: 'initTime', value: init_time })
+        }
+
+        // fake up an activation record and show it
+        ui.showEntity(activationModes({ type: 'activations',
+                                        activationId: sessionType,  // e.g. "debug session"
+                                        name: actionName,
+                                        annotations,
+                                        statusCode: 0,     // FIXME
+                                        start, end,
+                                        duration: end - start,
+                                        logs,
+                                        response: {
+                                            success: true, // FIXME
+                                            result
+                                        }
+                                      }))
+    } catch (err) {
+        console.error(err)
+    }
+}
+
+debug('loading done')
