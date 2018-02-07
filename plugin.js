@@ -134,11 +134,7 @@ const local = wsk => (_a, _b, fullArgv, modules, rawCommandString, _2, argvWitho
                     .then(() => init(d.kind, spinnerDiv))
                     .then(() => runActionInDocker(d.code, d.kind, Object.assign({}, d.param, d.input, input), d.binary, spinnerDiv))  
                     .then(res => displayAsActivation('local activation', d, start, wsk, res))
-                    .catch(e => {
-                        console.error(e)
-                        appendIncreContent(e, spinnerDiv, 'error')
-                        removeSpinner(returnDiv)
-                    })
+                    .catch(e => appendIncreContent(ui.oopsMessage(e), spinnerDiv, 'error'))
             }
             else if(argvWithoutOptions[1] === 'debug'){
                 let d
@@ -170,11 +166,7 @@ const local = wsk => (_a, _b, fullArgv, modules, rawCommandString, _2, argvWitho
                 .then(res => displayAsActivation('debug session', d, start, wsk, res))
                 .then(closeDebuggerUI)
                 .then(() => debug('debug session done', result))
-                .catch(e => {
-                    appendIncreContent(e, spinnerDiv, 'error')
-                    removeSpinner(returnDiv)
-                    reject(e)
-                });
+                .catch(e => appendIncreContent(ui.oopsMessage(e), spinnerDiv, 'error'))
             }
             else if(argvWithoutOptions[1] === 'init'){                
                 getImageDir(spinnerDiv)
@@ -746,6 +738,8 @@ const appendIncreContent = (content, div, error) => {
     }
 
     if(error){
+        errorSpinner(div)
+
         let message = content;
         if(content.error){
             if(content.message)
@@ -754,7 +748,7 @@ const appendIncreContent = (content, div, error) => {
                 message = JSON.stringify(content, null, 4);
         }        
 
-        $(div).find('.replay_output').append(`<div style='color:red;' class='fake-in'>${message}</div>`);
+        $(div).find('.replay_output').append(`<div class='red-text fake-in'>${message}</div>`);
     }
     else if(typeof content === 'string') {
         $(div).find('.replay_output').append(`<div style='padding-top:0.25ex' class='fade-in'>${content}</div>`);
@@ -767,11 +761,26 @@ const appendIncreContent = (content, div, error) => {
 
 }
 
-const removeSpinner = (div) => {
+/**
+ * Remove the appendIncreContent dom bits, i.e. the status messages
+ *
+ */
+const removeSpinner = div => {
     $(div).children('.replay_spinner').remove();
 }
 
-
+/**
+ * Display an error icon in place of the spinner icon
+ *
+ */
+const errorSpinner = spinnerDiv => {
+    const iconContainer = $(spinnerDiv).find('.replay_spinner')
+    $(iconContainer).css('animation', '')
+    $(iconContainer).css('color', '')
+    $(iconContainer).addClass('red-text')
+    $(iconContainer).empty()
+    $(iconContainer).append('<i class="fas fa-exclamation-triangle"></i>')
+}
 
 /**
  * Update the sidecar header to reflect the given viewName and entity
