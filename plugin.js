@@ -598,8 +598,7 @@ const runActionInDocker = (functionCode, functionKind, functionInput, isBinary, 
 }
 
 const debugCodeWrapper = (code, input, path) => {
-    return `\n\n${code}\n\n//below is the debuger code added by Shell \n\nlet debugMainFunc = exports.main ? exports.main : main; \nlet s = debugMainFunc(${JSON.stringify(input)});\nrequire('fs').writeFileSync('${path}', JSON.stringify(s))\n`;
-
+    return `\n\n${code}\n\n//below is the debuger code added by Shell \n\nlet debugMainFunc = exports.main ? exports.main : main; \nPromise.resolve(debugMainFunc(${JSON.stringify(input)})).then(data => {\nrequire('fs').writeFileSync('${path}', JSON.stringify(data, null, 4))\n});\n`;
 }
 
 /**
