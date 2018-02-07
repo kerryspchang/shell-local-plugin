@@ -146,11 +146,6 @@ const local = wsk => (_a, _b, fullArgv, modules, rawCommandString, _2, argvWitho
                 // when the debug session started
                 const start = Date.now()
 
-                const stopDebugger = () => {
-                    $('#debuggerDiv').remove()
-                    ui.clearSelection()
-                }
-
                 modes.push({ mode: 'stop-debugger', label: strings.stopDebugger, actAsButton: true,
                              direct: stopDebugger })
 
@@ -173,7 +168,7 @@ const local = wsk => (_a, _b, fullArgv, modules, rawCommandString, _2, argvWitho
                 })
                 .then(() => runActionDebugger(d.name, d.code, d.kind, Object.assign({}, d.param, d.input, input), d.binary, modules, spinnerDiv, returnDiv, dashOptions))
                 .then(res => displayAsActivation('debug session', d, start, wsk, res))
-                .then(stopDebugger)
+                .then(closeDebuggerUI)
                 .then(() => debug('debug session done', result))
                 .catch(e => {
                     appendIncreContent(e, spinnerDiv, 'error')
@@ -292,6 +287,8 @@ const kill = spinnerDiv => {
  *
  */
 const init = (kind, spinnerDiv) => {
+    appendIncreContent('Starting local container', spinnerDiv);
+
     return new Promise((resolve, reject) => {
 
         new Promise((resolve, reject) => {   
@@ -363,7 +360,6 @@ const init = (kind, spinnerDiv) => {
                 return Promise.resolve(d);
             }
             else{                
-                appendIncreContent('Starting docker container', spinnerDiv);
                 return docker.container.create(Object.assign({Image: d[0]}, dockerConfig))
             }
         })             
@@ -431,7 +427,7 @@ const getActionNameAndInputFromActivations = (actId, spinnerDiv) => {
  *
  */
 const getActionCode = (actionName, spinnerDiv) => {
-    appendIncreContent('Retrieving action code', spinnerDiv);
+    appendIncreContent('Fetching action', spinnerDiv);
     return repl.qexec(`wsk action get ${actionName}`)
         .then(action => {
             let param = {};
@@ -619,11 +615,14 @@ const debugCodeWrapper = (code, input, path) => {
  *
  */
 const runActionDebugger = (actionName, functionCode, functionKind, functionInput, isBinary, { ui }, spinnerDiv, returnDiv, dashOptions) => new Promise((resolve, reject) => {
+    appendIncreContent('Preparing debugger', spinnerDiv)
+
     // this specifies a path inside docker container, so we should not
     // need to worry about hard-coding something here
     const resultFilePath = '/tmp/debug-session.out';
 
-    // we need to amend the functionCode with a prolog that write the result somewhere we can find
+    // we need to amend the functionCode with a prolog that writes the
+    // result somewhere we can find
     let fileCode, entry;
     if(isBinary){
         fileCode = functionCode;
@@ -871,6 +870,23 @@ const displayAsActivation = (sessionType, { kind, actionName, name }, start, { a
     } catch (err) {
         console.error(err)
     }
+}
+
+/**
+ * Clean up the debugger UI
+ *
+ */
+const closeDebuggerUI = ({closeSidecar=false}={}) => {
+    $('#debuggerDiv').remove()
+}
+
+/**
+ * Clean up the debugger UI and close the sidecar
+*
+*/
+const stopDebugger = () => {
+    closeDebuggerUI()
+    ui.clearSelection()
 }
 
 debug('loading done')
