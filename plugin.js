@@ -25,7 +25,8 @@ const { Docker } = require('node-docker-api'),
       $ = require('jquery'),
       rt = require('requestretry'),        
       fs = require('fs-extra'),
-      tmp = require('tmp')
+      tmp = require('tmp'),
+      extract = require('extract-zip');
 
 debug('modules loaded')
 
@@ -61,7 +62,6 @@ let _container, _containerType, _containerCode, _imageDir, _image;
 module.exports = (commandTree, prequire) => {
     const wsk = prequire('/ui/commands/openwhisk-core')
     const handler = local(wsk)
-
     commandTree.listen('/local', handler, Object.assign({docs: docs.overall}, commandOptions));
     commandTree.listen('/local/play', handler, Object.assign({docs: docs.play}, commandOptions));
     commandTree.listen('/local/debug', handler, Object.assign({docs: docs.debug}, commandOptions));
@@ -167,10 +167,10 @@ const local = wsk => (_a, _b, fullArgv, modules, rawCommandString, _2, argvWitho
                              getImageDir(spinnerDiv)])
                     .then(([data]) => data)
                     .then(updateSidecarHeader('local invoke'))
-                    .then(data => {d = data; return getActionCode(data.name, spinnerDiv)})   // data: code, kind
+                    .then(data => {d = data; return getActionCode(data.name, spinnerDiv)})   // data: code, kind, binary
                     .then(data => {d = Object.assign({}, d, data)})
                     .then(() => init(d.kind, spinnerDiv))
-                    .then(() => runActionInDocker(d.code, d.kind, Object.assign({}, d.input, input), spinnerDiv))  
+                    .then(() => runActionInDocker(d.code, d.kind, Object.assign({}, d.param, d.input, input), d.binary, spinnerDiv))  
                     .then(res => displayAsActivation('local activation', d, start, wsk, res))
                     .catch(e => {
                         console.error(e)
@@ -209,7 +209,7 @@ const local = wsk => (_a, _b, fullArgv, modules, rawCommandString, _2, argvWitho
                     }
                     
                 })
-                .then(() => runActionDebugger(d.name, d.code, d.kind, Object.assign({}, d.input, input), modules, spinnerDiv, returnDiv, dashOptions))
+                .then(() => runActionDebugger(d.name, d.code, d.kind, Object.assign({}, d.param, d.input, input), d.binary, modules, spinnerDiv, returnDiv, dashOptions))
                 .then(res => displayAsActivation('debug session', d, start, wsk, res))
                 .then(stopDebugger)
                 .then(() => debug('debug session done', result))
@@ -471,7 +471,13 @@ const getActionNameAndInputFromActivations = (actId, spinnerDiv) => {
 const getActionCode = (actionName, spinnerDiv) => {
     appendIncreContent('Retrieving action code', spinnerDiv);
     return repl.qexec(`wsk action get ${actionName}`)
-        .then(action => action.exec)
+        .then(action => {
+            let param = {};
+            if(action.parameters){
+                action.parameters.forEach(a => {param[a.name] = a.value});
+            }
+            return Object.assign(action.exec, {param: param});
+        })
 }
 
 /**
@@ -568,7 +574,7 @@ const fetchLogs = container => result => {
  * action, we can avoid calling /init again.
  *
  */
-const runActionInDocker = (functionCode, functionKind, functionInput, spinnerDiv) => {
+const runActionInDocker = (functionCode, functionKind, functionInput, isBinary, spinnerDiv) => {
     let start, init, run, end;
     return new Promise((resolve, reject) => {
         let p;
@@ -591,7 +597,8 @@ const runActionInDocker = (functionCode, functionKind, functionInput, spinnerDiv
                 json : {
                     value: {
                         code: functionCode,
-                        main: 'main'
+                        main: 'main',
+                        binary: isBinary ? isBinary : false
                     }
                 }
             })
@@ -640,82 +647,130 @@ const runActionInDocker = (functionCode, functionKind, functionInput, spinnerDiv
     });
 }
 
+const debugCodeWrapper = (code, input, path) => {
+    return `\n\n${code}\n\n//below is the debuger code added by Shell \n\nlet debugMainFunc = exports.main ? exports.main : main; \nlet s = debugMainFunc(${JSON.stringify(input)});\nrequire('fs').writeFileSync('${path}', JSON.stringify(s))\n`;
+
+}
+
 /**
  * Run the given code inside a local debugging session
  *
  */
-const runActionDebugger = (actionName, functionCode, functionKind, functionInput, { ui }, spinnerDiv, returnDiv, dashOptions) => new Promise((resolve, reject) => {
+const runActionDebugger = (actionName, functionCode, functionKind, functionInput, isBinary, { ui }, spinnerDiv, returnDiv, dashOptions) => new Promise((resolve, reject) => {
     // this specifies a path inside docker container, so we should not
     // need to worry about hard-coding something here
-    const resultFilePath = '/tmp/debug-session.out'
+    const resultFilePath = '/tmp/debug-session.out';
 
     // we need to amend the functionCode with a prolog that write the result somewhere we can find
-    const fileCode = `\n\n${functionCode}\n\nrequire('fs').writeFileSync('${resultFilePath}', JSON.stringify(main(${JSON.stringify(functionInput)}), null, 4))\n`;
+    let fileCode, entry;
+    if(isBinary){
+        fileCode = functionCode;
+    }
+    else{
+        fileCode = debugCodeWrapper(functionCode, functionInput, resultFilePath);
+    }
 
     // note that we use the action's name (e.g. myAction.js) as the
     // file name, so that it appears nicely in call stacks and other
     // line numbery displays in the debugger
-    const debugFileName = actionName.substring(actionName.lastIndexOf('/') + 1)
-          + (kindToExtension[functionKind.replace(/:.*$/,'')] || '')
+    let debugFileName;  
+    if(isBinary){
+        debugFileName = actionName+'.zip';  // for zip actions, use .zip as the extension name
+    }
+    else {   
+        debugFileName = actionName.substring(actionName.lastIndexOf('/') + 1)
+          + (kindToExtension[functionKind.replace(/:.*$/,'')] || '');
+    }
 
     //
     // write out our function code, copy it into the docker container,
     // then spawn the debugger, and finally wait for the debug session
     // to complete; at that point, we resolve with { result, logs }
     //
-    writeToTempFile(fileCode).then(({tmpPath, cleanupCallback}) => {                     // write fileCode to local temp file
-        repl.qexec(`! docker cp ${tmpPath} shell-local:/nodejsAction/${debugFileName}`)  // copy temp file into container
-            .then(() => appendIncreContent('Starting the debugger', spinnerDiv))         // status update
-            .then(() => {
-                // this is where we launch the local debugger, and wait for it to terminate
-                // as to why we need to hack for the Waiting for debugger on stderr:
-                // https://bugs.chromium.org/p/chromium/issues/detail?id=706916
-                const logLines = []
-                repl.qexec(`! docker exec shell-local node --inspect-brk=0.0.0.0:5858 ${debugFileName}`, undefined, undefined,
-                           { stdout: line => logLines.push(logLine('stdout', line)),
-                             stderr: line => {
-                               if (line.indexOf('Waiting for the debugger to disconnect') >= 0) {
-                                   repl.qexec(`! docker cp shell-local:${resultFilePath} ${tmpPath}`)
-                                       .then(() => fs.readFile(tmpPath))
-                                       .then(result => JSON.parse(result.toString()))
-                                       .then(result => { cleanupCallback(); return result; }) // clean up tmpPath
-                                       .then(result => resolve({ result,
-                                                                 logs: logLines }))
-                               } else if (line.indexOf('Debugger listening on') >= 0) {
-                                   // squash
-                               } else if (line.indexOf('For help see https://nodejs.org/en/docs/inspector') >= 0) {
-                                   // squash
-                               } else if (line.indexOf('Debugger attached') >= 0) {
-                                   // squash
-                               } else {
-                                   // otherwise, hopefully this is a legit application log line
-                                   logLines.push(logLine('stderr', line))
-                               }
-                           } }).catch(reject)
-            })
-            // now, we fetch the URL exported by the local debugger
-            // and use this URL to open a webview container around it
-            .then(() => rt({ method: 'get', url: 'http://0.0.0.0:5858/json', json: true}))   // fetch url...
-            .then(data => {
-                // here, we extract the relevant bits of the URL from the response
-                if(data && data.body && data.body.length > 0 && data.body[0].devtoolsFrontendUrl) {
-                    return data.body[0].devtoolsFrontendUrl.substring(data.body[0].devtoolsFrontendUrl.lastIndexOf('/'));
-                }
-            })
-            .then(backtag => {
-                // and make webview container from it!
-                if (backtag) {
-                    // remove the spinnery bits
-                    ui.removeAllDomChildren(returnDiv[0])
 
-                    // create and attach the webview
-                    const webview = $(`<div id="debuggerDiv" style="flex: 1; display: flex"><webview style="flex:1" src="${debuggerURL}${backtag}" autosize="on"></webview></div>`);
-                    $(returnDiv).append(webview)
-
-                    // avoid the repl capturing mouse clicks
-                    $(webview).mouseup(e => {e.stopPropagation();})
+    createTempFolder()
+    .then(d => {  // create a local temp folder
+        let dirPath = d.path, cleanupCallback = d.cleanupCallback, containerFolderPath = dirPath.substring(dirPath.lastIndexOf('/')+1), entry;        
+        fs.outputFile(`${dirPath}/${debugFileName}`, fileCode, isBinary?'base64':undefined) // write file to that local temp folder
+        .then(() => {     
+            return new Promise((resolve, reject) => {                
+                if(isBinary){   // if it is a zip action, unzip first
+                    extract(`${dirPath}/${debugFileName}`, {dir: `${dirPath}`}, function (err) {
+                        if(err){
+                            reject(err);
+                        }
+                        else{                            
+                            fs.readFile(`${dirPath}/package.json`)  // read package.json
+                            .then(data => {                            
+                                entry = JSON.parse(data).main;
+                                return fs.readFile(`${dirPath}/${entry}`);  // get the entry js file
+                            })
+                            .then(data => {
+                                let newCode = debugCodeWrapper(data.toString(), functionInput, resultFilePath); // wrap that js file with our runnner code
+                                return fs.outputFile(`${dirPath}/${entry}`, newCode);   // write the new file to temp directory
+                            })
+                            .then(() => {resolve(entry)})  
+                        }                   
+                    });
                 }
-            })
+                else {
+                    entry = debugFileName;
+                    resolve(true);
+                }
+            });  
+        })
+        .then(() => repl.qexec(`! docker cp ${dirPath} shell-local:/nodejsAction`)) // copy temp dir into container
+        .then(() => appendIncreContent('Starting the debugger', spinnerDiv))         // status update
+        .then(() => {
+            // this is where we launch the local debugger, and wait for it to terminate
+            // as to why we need to hack for the Waiting for debugger on stderr:
+            // https://bugs.chromium.org/p/chromium/issues/detail?id=706916
+            const logLines = []
+            repl.qexec(`! docker exec shell-local node --inspect-brk=0.0.0.0:5858 ${containerFolderPath}/${entry}`, undefined, undefined,
+                       { stdout: line => logLines.push(logLine('stdout', line)),
+                         stderr: line => {
+                           if (line.indexOf('Waiting for the debugger to disconnect') >= 0) {
+                               repl.qexec(`! docker cp shell-local:${resultFilePath} ${dirPath}/debug-session.out`)
+                                   .then(() => fs.readFile(`${dirPath}/debug-session.out`))
+                                   .then(result => JSON.parse(result.toString()))
+                                   .then(result => { cleanupCallback(); return result; }) // clean up tmpPath
+                                   .then(result => resolve({ result,
+                                                             logs: logLines }))
+                           } else if (line.indexOf('Debugger listening on') >= 0) {
+                               // squash
+                           } else if (line.indexOf('For help see https://nodejs.org/en/docs/inspector') >= 0) {
+                               // squash
+                           } else if (line.indexOf('Debugger attached') >= 0) {
+                               // squash
+                           } else {
+                               // otherwise, hopefully this is a legit application log line
+                               logLines.push(logLine('stderr', line))
+                           }
+                       } }).catch(reject)
+        })
+        // now, we fetch the URL exported by the local debugger
+        // and use this URL to open a webview container around it
+        .then(() => rt({ method: 'get', url: 'http://0.0.0.0:5858/json', json: true}))   // fetch url...
+        .then(data => {
+            // here, we extract the relevant bits of the URL from the response
+            if(data && data.body && data.body.length > 0 && data.body[0].devtoolsFrontendUrl) {
+                return data.body[0].devtoolsFrontendUrl.substring(data.body[0].devtoolsFrontendUrl.lastIndexOf('/'));
+            }
+        })
+        .then(backtag => {
+            // and make webview container from it!
+            if (backtag) {
+                // remove the spinnery bits
+                ui.removeAllDomChildren(returnDiv[0])
+
+                // create and attach the webview
+                const webview = $(`<div id="debuggerDiv" style="flex: 1; display: flex"><webview style="flex:1" src="${debuggerURL}${backtag}" autosize="on"></webview></div>`);
+                $(returnDiv).append(webview)
+
+                // avoid the repl capturing mouse clicks
+                $(webview).mouseup(e => {e.stopPropagation();})
+            }
+        })
     })
 })
 
@@ -806,6 +861,20 @@ const writeToTempFile = string => new Promise((resolve, reject) => {
     })
 })
 
+
+const createTempFolder = () => new Promise((resolve, reject) => {
+    tmp.dir({unsafeCleanup: true}, function _tempDirCreated(err, path, cleanupCallback) {
+        if (err) {
+            console.error(err)
+            reject('Internal Error')
+        }
+        else{
+            resolve({path: path, cleanupCallback: cleanupCallback});
+        }
+      //console.log('Dir: ', path);
+     
+    });
+});
 /**
 *
 *
